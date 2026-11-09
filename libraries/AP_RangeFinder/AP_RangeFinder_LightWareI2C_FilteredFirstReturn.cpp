@@ -351,7 +351,7 @@ bool AP_RangeFinder_LightWareI2CFILTEREDFIRSTRETURN::legacy_get_reading(float &r
         int16_t signed_val = int16_t(be16toh(val));
         if (signed_val < 0) {
             // some lidar firmwares will return 65436 for out of range
-            reading_m = uint16_t(max_distance() + LIGHTWARE_OUT_OF_RANGE_ADD_CM) * 0.01f;
+            reading_m = max_distance() + LIGHTWARE_OUT_OF_RANGE_ADD_CM * 0.01f;
         } else {
             reading_m = uint16_t(signed_val) * 0.01f;
         }
@@ -416,7 +416,7 @@ bool AP_RangeFinder_LightWareI2CFILTEREDFIRSTRETURN::sf20_parse_stream(uint8_t *
       we will return max distance
      */
     if (strncmp((const char *)&stream_buf[*p_num_processed_chars], "-1.00", 5) == 0) {
-        val = uint16_t(max_distance() + LIGHTWARE_OUT_OF_RANGE_ADD_CM);
+        val = uint16_t(max_distance() * 100.0f + LIGHTWARE_OUT_OF_RANGE_ADD_CM);
         (*p_num_processed_chars) += 5;
         return true;
     }
