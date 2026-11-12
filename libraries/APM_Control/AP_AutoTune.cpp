@@ -157,6 +157,23 @@ void AP_AutoTune::stop(void)
     }
 }
 
+/*
+  called in place of update() while the aircraft response can't be
+  learned from, such as while quadplane VTOL motors are assisting. Any
+  event in progress is abandoned, and the oscillation tracking and
+  filters start afresh when updates resume
+ */
+void AP_AutoTune::pause(void)
+{
+    if (!running) {
+        return;
+    }
+    state_change(ATState::IDLE);
+    actuator_filter.reset();
+    rate_filter.reset();
+    target_filter.reset();
+}
+
 const char *AP_AutoTune::axis_string(void) const
 {
     return axis_string(type);

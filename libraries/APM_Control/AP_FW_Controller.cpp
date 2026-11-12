@@ -95,9 +95,14 @@ float AP_FW_Controller::_get_rate_out(float desired_rate, float scaler, bool dis
     // remember the last output to trigger the I limit
     _last_out = out;
 
-    if (autotune != nullptr && autotune->running && aspeed > aparm.airspeed_min) {
-        // let autotune have a go at the values
-        autotune->update(pinfo, scaler, angle_err_deg);
+    if (autotune != nullptr && autotune->running) {
+        if (autotune_paused) {
+            // the response is not from the control surfaces alone
+            autotune->pause();
+        } else if (aspeed > aparm.airspeed_min) {
+            // let autotune have a go at the values
+            autotune->update(pinfo, scaler, angle_err_deg);
+        }
     }
 
     // output is scaled to notional centidegrees of deflection
