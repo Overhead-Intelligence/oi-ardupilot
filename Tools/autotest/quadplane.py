@@ -16,6 +16,7 @@ from pymavlink.rotmat import Vector3
 import vehicle_test_suite
 from vehicle_test_suite import Test
 from vehicle_test_suite import AutoTestTimeoutException, NotAchievedException, PreconditionFailedException
+from vehicle_test_suite import AltFrame
 
 import operator
 
@@ -856,10 +857,12 @@ class AutoTestQuadPlane(vehicle_test_suite.TestSuite):
         def fly_terrain_leg():
             '''take off and hold a terrain-relative target, as a terrain-following mission would'''
             self.takeoff(20, mode='GUIDED')
-            self.send_do_reposition(Location(SITL_START_LOCATION.lat,
-                                             SITL_START_LOCATION.lng,
-                                             30,
-                                             AltFrame.ABOVE_TERRAIN))
+            self.send_do_reposition(
+                mavutil.location(SITL_START_LOCATION.lat,
+                                 SITL_START_LOCATION.lng,
+                                 30,
+                                 0),
+                frame=mavutil.mavlink.MAV_FRAME_GLOBAL_TERRAIN_ALT)
             self.wait_altitude(25, 35,
                                altitude_source="TERRAIN_REPORT.current_height",
                                minimum_duration=5,
