@@ -133,6 +133,12 @@ void AP_AutoTune::start(void)
         rpid.ff().set(current.FF);
     }
 
+    // clear the oscillation tracking. It is otherwise only reset when
+    // an event ends, and a newly allocated AP_AutoTune is zero filled,
+    // so the first event after boot always looked like an oscillation
+    // and cut P and D (P to 35%)
+    state_change(ATState::IDLE);
+
     Debug("START FF -> %.3f\n", rpid.ff().get());
 }
 
