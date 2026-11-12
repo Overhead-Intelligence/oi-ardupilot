@@ -1004,6 +1004,67 @@ class AutoTestQuadPlane(vehicle_test_suite.TestSuite):
 
         self.wait_disarmed(timeout=200)
 
+    def QAssistFWAutotune(self):
+        '''Check the fixed wing autotune does not learn while Q assist is helping'''
+        self.set_parameters({
+            "RC7_OPTION": 107,  # fixed wing autotune
+            "RC8_OPTION": 82,   # Q assist: low disabled, middle normal, high forced
+        })
+        self.set_rc(7, 1000)
+        self.set_rc(8, 1500)
+        # the autotune state is allocated on first use, so start from a fresh boot
+        self.reboot_sitl()
+
+        self.takeoff(50, mode="QHOVER", timeout=120)
+        self.set_rc(3, 1800)
+        self.change_mode("FBWA")
+        thr_min_pwm = self.get_parameter("Q_M_PWM_MIN")
+        self.progress("Waiting for the transition to finish")
+        self.wait_servo_channel_value(5, thr_min_pwm, timeout=30, comparator=operator.eq)
+        self.delay_sim_time(5)
+
+        self.context_push()
+        self.context_collect('STATUSTEXT')
+        self.progress("Forcing Q assist on")
+        self.set_rc(8, 2000)
+        self.wait_statustext('QAssist: Force enabled', check_context=True)
+        self.wait_servo_channel_value(5, thr_min_pwm + 50, timeout=30, comparator=operator.gt)
+        self.progress("Starting the fixed wing autotune")
+        self.set_rc(7, 2000)
+        self.wait_statustext('Started autotune', check_context=True)
+
+        names = ("RLL_RATE_P", "RLL_RATE_D", "RLL_RATE_FF", "PTCH_RATE_P", "PTCH_RATE_D", "PTCH_RATE_FF")
+        before = {n: self.get_parameter(n) for n in names}
+        self.progress("Making sharp pitch and roll inputs while Q assist is active")
+        for chan in (2, 1):
+            for i in range(6):
+                self.set_rc(chan, 2000 if i % 2 == 0 else 1000)
+                self.delay_sim_time(1)
+            self.set_rc(chan, 1500)
+            self.delay_sim_time(2)
+        for n in names:
+            value = self.get_parameter(n)
+            if value != before[n]:
+                raise NotAchievedException("%s changed from %f to %f while Q assist was active" % (n, before[n], value))
+
+        self.progress("Releasing Q assist, the autotune should learn again")
+        self.set_rc(8, 1500)
+        self.wait_servo_channel_value(5, thr_min_pwm, timeout=60, comparator=operator.eq)
+        self.delay_sim_time(2)
+        for i in range(4):
+            self.set_rc(2, 2000 if i % 2 == 0 else 1000)
+            self.delay_sim_time(1)
+        self.set_rc(2, 1500)
+        self.delay_sim_time(2)
+        if self.get_parameter("PTCH_RATE_FF") == before["PTCH_RATE_FF"]:
+            raise NotAchievedException("Autotune did not learn after Q assist ended")
+        self.set_rc(7, 1000)
+        self.wait_statustext('Stopped autotune', check_context=True)
+        self.context_pop()
+
+        self.change_mode("QRTL")
+        self.wait_disarmed(timeout=300)
+
     def LoiterAltQLand(self):
         '''test loitering and qland with terrain involved'''
         self.LoiterAltQLand_Terrain(
@@ -3182,6 +3243,7 @@ class AutoTestQuadPlane(vehicle_test_suite.TestSuite):
             self.Mission,
             self.Weathervane,
             self.QAssist,
+            self.QAssistFWAutotune,
             self.GyroFFT,
             self.Tailsitter,
             self.CopterTailsitter,
