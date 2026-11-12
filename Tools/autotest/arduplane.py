@@ -4730,6 +4730,45 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         })
         self.run_autotune()
 
+    def AutotuneFirstEvent(self):
+        '''Check the first autotune event after boot does not cut P and D without an oscillation'''
+        # the autotune state is allocated on first use, so start from a fresh boot
+        self.reboot_sitl()
+        self.takeoff(100)
+        self.change_mode('FBWA')
+        self.set_rc(1, 1500)
+        self.set_rc(2, 1500)
+        self.delay_sim_time(10)
+
+        names = ("PTCH_RATE_P", "PTCH_RATE_D", "PTCH_RATE_FF")
+        before = {n: self.get_parameter(n) for n in names}
+        self.progress("Pitch gains before the autotune: %s" % str(before))
+
+        # start the autotune in level flight so the pitch input below is its first event,
+        # and releasing the stick the second. The autotune halves P by design on its 4th event
+        self.context_push()
+        self.context_collect('STATUSTEXT')
+        self.run_cmd(mavutil.mavlink.MAV_CMD_DO_AUTOTUNE_ENABLE, p1=1)
+        self.wait_statustext('Started autotune', check_context=True)
+        self.delay_sim_time(2)
+        self.set_rc(2, 2000)
+        self.delay_sim_time(1)
+        self.set_rc(2, 1500)
+        self.delay_sim_time(4)
+
+        after = {n: self.get_parameter(n) for n in names}
+        self.progress("Pitch gains after the first events: %s" % str(after))
+        self.run_cmd(mavutil.mavlink.MAV_CMD_DO_AUTOTUNE_ENABLE, p1=0)
+        self.wait_statustext('Stopped autotune', check_context=True)
+        self.context_pop()
+        if after["PTCH_RATE_FF"] == before["PTCH_RATE_FF"]:
+            raise NotAchievedException("Autotune did not complete a pitch event")
+        for n in ("PTCH_RATE_P", "PTCH_RATE_D"):
+            if after[n] < 0.99 * before[n]:
+                raise NotAchievedException("First autotune event cut %s from %f to %f" % (n, before[n], after[n]))
+
+        self.fly_home_land_and_disarm()
+
     def LandingDrift(self):
         '''Circuit with baro drift'''
         self.customise_SITL_commandline([], wipe=True)
@@ -8092,6 +8131,7 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             self.MAVFTP,
             self.AUTOTUNE,
             self.AutotuneFiltering,
+            self.AutotuneFirstEvent,
             self.MegaSquirt,
             self.Hirth,
             self.MSP_DJI,
