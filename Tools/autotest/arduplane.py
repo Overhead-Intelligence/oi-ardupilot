@@ -4613,14 +4613,20 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         self.assert_parameter_value_pct("RLL_RATE_P", 1.222702146, 2)
         self.assert_parameter_value_pct("RLL_RATE_FF", 0.229291457, 2)
 
-        self.assert_parameter_value_pct("PTCH_RATE_FF", 0.503520715, 5)
+        # mean of 5 runs after the first-event fix (2026-11), 0.5035 before it
+        self.assert_parameter_value_pct("PTCH_RATE_FF", 0.514601, 5)
+
+        # The D values below are the earlier ones divided by 0.975 (2026-11). The first
+        # event after boot used to cut D by 0.75 before the D steps of 1.3, so without
+        # that cut each D solution sits 1/(0.75*1.3) higher. P is unchanged because the
+        # first-event cut of 0.35 nearly equals four P steps (1/1.3^4).
 
         # there are sometimes multiple solutions for roll but the distribution
         # is much more skewed than pitch below
         try:
-            self.assert_parameter_value_pct("RLL_RATE_D", 0.070284024, 2)
+            self.assert_parameter_value_pct("RLL_RATE_D", 0.072086178, 2)
         except ValueError:
-            self.assert_parameter_value_pct("RLL_RATE_D", 0.091369226, 2) # added 2025-10
+            self.assert_parameter_value_pct("RLL_RATE_D", 0.093712027, 2) # added 2025-10
 
         # There seem to be multiple solutions for pitch. I'm not sure why this is.
         # Each value is quite consistent because of the fixed steps that autotune takes
@@ -4637,21 +4643,21 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
 
         try:
             # 64%
-            self.assert_parameter_value_pct("PTCH_RATE_D", 0.108, 2)
+            self.assert_parameter_value_pct("PTCH_RATE_D", 0.11077, 2)
         except ValueError:
             try:
                 # 28%
-                self.assert_parameter_value_pct("PTCH_RATE_D", 0.141, 2)
+                self.assert_parameter_value_pct("PTCH_RATE_D", 0.14462, 2)
             except ValueError:
                 try:
                     # 4%
-                    self.assert_parameter_value_pct("PTCH_RATE_D", 0.049, 2)
+                    self.assert_parameter_value_pct("PTCH_RATE_D", 0.050256, 2)
                 except ValueError:
                     # 4%
                     try:
-                        self.assert_parameter_value_pct("PTCH_RATE_D", 0.0836, 2)
+                        self.assert_parameter_value_pct("PTCH_RATE_D", 0.085744, 2)
                     except ValueError:
-                        self.assert_parameter_value_pct("PTCH_RATE_D", 0.0380, 2) # added 2025-10
+                        self.assert_parameter_value_pct("PTCH_RATE_D", 0.038974, 2) # added 2025-10
 
     def run_autotune(self):
         self.takeoff(100)
