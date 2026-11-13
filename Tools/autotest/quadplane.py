@@ -972,12 +972,6 @@ class AutoTestQuadPlane(vehicle_test_suite.TestSuite):
         # altitude assist, so run their subtests with it set
         self.set_parameter("Q_ASSIST_OPTIONS", 4)
 
-        # Disable speed assist and alt assist during angle assist tests
-        self.set_parameters({
-            "Q_ASSIST_SPEED": 1,
-            "Q_ASSIST_ALT": 0,
-        })
-
         self.start_subtest("Test angle assist (roll)")
         self.context_push()
         self.context_collect('STATUSTEXT')
