@@ -358,11 +358,16 @@ float AP_YawController::get_rate_out(float desired_rate, float scaler, bool disa
     // remember the last output to trigger the I limit
     _last_out = out;
 
-    if (autotune != nullptr && autotune->running && aspeed > aparm.airspeed_min) {
-        // fake up an angular error based on a notional time constant of 0.5s
-        const float angle_err_deg = desired_rate * gains.tau;
-        // let autotune have a go at the values
-        autotune->update(pinfo, scaler, angle_err_deg);
+    if (autotune != nullptr && autotune->running) {
+        if (autotune_paused) {
+            // the response is not from the control surfaces alone
+            autotune->pause();
+        } else if (aspeed > aparm.airspeed_min) {
+            // fake up an angular error based on a notional time constant of 0.5s
+            const float angle_err_deg = desired_rate * gains.tau;
+            // let autotune have a go at the values
+            autotune->update(pinfo, scaler, angle_err_deg);
+        }
     }
 
     // output is scaled to notional centidegrees of deflection

@@ -29,6 +29,10 @@ public:
     void autotune_start(void);
     void autotune_restore(void);
 
+    // hold the autotune while the aircraft response is not from the
+    // fixed wing control surfaces alone, such as during quadplane assist
+    void autotune_set_paused(bool paused) { autotune_paused = paused; }
+
     const AP_PIDInfo& get_pid_info(void) const
     {
         return _pid_info;
@@ -48,6 +52,7 @@ protected:
     AP_AutoTune::ATGains gains;
     AP_AutoTune *autotune;
     bool failed_autotune_alloc;
+    bool autotune_paused;
     float _last_out;
     AC_PID rate_pid;
     float angle_err_deg;

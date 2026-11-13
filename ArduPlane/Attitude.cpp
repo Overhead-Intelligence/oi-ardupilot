@@ -434,6 +434,14 @@ void Plane::stabilize()
     if (quadplane.available()) {
         quadplane.transition->set_FW_roll_pitch(nav_pitch_cd, nav_roll_cd);
     }
+
+    // the fixed wing autotune learns how the aircraft responds to
+    // its control surfaces, so hold it while the VTOL motors help:
+    // their thrust and vibration look like an oscillation and cut gains
+    const bool vtol_motors_helping = quadplane.in_assisted_flight() || quadplane.in_vtol_mode();
+    rollController.autotune_set_paused(vtol_motors_helping);
+    pitchController.autotune_set_paused(vtol_motors_helping);
+    yawController.autotune_set_paused(vtol_motors_helping);
 #endif
 
 #if AP_PLANE_SYSTEMID_ENABLED

@@ -133,6 +133,12 @@ void AP_AutoTune::start(void)
         rpid.ff().set(current.FF);
     }
 
+    // clear the oscillation tracking. It is otherwise only reset when
+    // an event ends, and a newly allocated AP_AutoTune is zero filled,
+    // so the first event after boot always looked like an oscillation
+    // and cut P and D (P to 35%)
+    state_change(ATState::IDLE);
+
     Debug("START FF -> %.3f\n", rpid.ff().get());
 }
 
@@ -149,6 +155,23 @@ void AP_AutoTune::stop(void)
             restore_gains();
         }
     }
+}
+
+/*
+  called in place of update() while the aircraft response can't be
+  learned from, such as while quadplane VTOL motors are assisting. Any
+  event in progress is abandoned, and the oscillation tracking and
+  filters start afresh when updates resume
+ */
+void AP_AutoTune::pause(void)
+{
+    if (!running) {
+        return;
+    }
+    state_change(ATState::IDLE);
+    actuator_filter.reset();
+    rate_filter.reset();
+    target_filter.reset();
 }
 
 const char *AP_AutoTune::axis_string(void) const

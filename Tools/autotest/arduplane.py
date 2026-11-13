@@ -4613,14 +4613,20 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         self.assert_parameter_value_pct("RLL_RATE_P", 1.222702146, 2)
         self.assert_parameter_value_pct("RLL_RATE_FF", 0.229291457, 2)
 
-        self.assert_parameter_value_pct("PTCH_RATE_FF", 0.503520715, 5)
+        # mean of 5 runs after the first-event fix (2026-11), 0.5035 before it
+        self.assert_parameter_value_pct("PTCH_RATE_FF", 0.514601, 5)
+
+        # The D values below are the earlier ones divided by 0.975 (2026-11). The first
+        # event after boot used to cut D by 0.75 before the D steps of 1.3, so without
+        # that cut each D solution sits 1/(0.75*1.3) higher. P is unchanged because the
+        # first-event cut of 0.35 nearly equals four P steps (1/1.3^4).
 
         # there are sometimes multiple solutions for roll but the distribution
         # is much more skewed than pitch below
         try:
-            self.assert_parameter_value_pct("RLL_RATE_D", 0.070284024, 2)
+            self.assert_parameter_value_pct("RLL_RATE_D", 0.072086178, 2)
         except ValueError:
-            self.assert_parameter_value_pct("RLL_RATE_D", 0.091369226, 2) # added 2025-10
+            self.assert_parameter_value_pct("RLL_RATE_D", 0.093712027, 2) # added 2025-10
 
         # There seem to be multiple solutions for pitch. I'm not sure why this is.
         # Each value is quite consistent because of the fixed steps that autotune takes
@@ -4637,21 +4643,21 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
 
         try:
             # 64%
-            self.assert_parameter_value_pct("PTCH_RATE_D", 0.108, 2)
+            self.assert_parameter_value_pct("PTCH_RATE_D", 0.11077, 2)
         except ValueError:
             try:
                 # 28%
-                self.assert_parameter_value_pct("PTCH_RATE_D", 0.141, 2)
+                self.assert_parameter_value_pct("PTCH_RATE_D", 0.14462, 2)
             except ValueError:
                 try:
                     # 4%
-                    self.assert_parameter_value_pct("PTCH_RATE_D", 0.049, 2)
+                    self.assert_parameter_value_pct("PTCH_RATE_D", 0.050256, 2)
                 except ValueError:
                     # 4%
                     try:
-                        self.assert_parameter_value_pct("PTCH_RATE_D", 0.0836, 2)
+                        self.assert_parameter_value_pct("PTCH_RATE_D", 0.085744, 2)
                     except ValueError:
-                        self.assert_parameter_value_pct("PTCH_RATE_D", 0.0380, 2) # added 2025-10
+                        self.assert_parameter_value_pct("PTCH_RATE_D", 0.038974, 2) # added 2025-10
 
     def run_autotune(self):
         self.takeoff(100)
@@ -4723,6 +4729,45 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             "PTCH_RATE_FLTT": 20,
         })
         self.run_autotune()
+
+    def AutotuneFirstEvent(self):
+        '''Check the first autotune event after boot does not cut P and D without an oscillation'''
+        # the autotune state is allocated on first use, so start from a fresh boot
+        self.reboot_sitl()
+        self.takeoff(100)
+        self.change_mode('FBWA')
+        self.set_rc(1, 1500)
+        self.set_rc(2, 1500)
+        self.delay_sim_time(10)
+
+        names = ("PTCH_RATE_P", "PTCH_RATE_D", "PTCH_RATE_FF")
+        before = {n: self.get_parameter(n) for n in names}
+        self.progress("Pitch gains before the autotune: %s" % str(before))
+
+        # start the autotune in level flight so the pitch input below is its first event,
+        # and releasing the stick the second. The autotune halves P by design on its 4th event
+        self.context_push()
+        self.context_collect('STATUSTEXT')
+        self.run_cmd(mavutil.mavlink.MAV_CMD_DO_AUTOTUNE_ENABLE, p1=1)
+        self.wait_statustext('Started autotune', check_context=True)
+        self.delay_sim_time(2)
+        self.set_rc(2, 2000)
+        self.delay_sim_time(1)
+        self.set_rc(2, 1500)
+        self.delay_sim_time(4)
+
+        after = {n: self.get_parameter(n) for n in names}
+        self.progress("Pitch gains after the first events: %s" % str(after))
+        self.run_cmd(mavutil.mavlink.MAV_CMD_DO_AUTOTUNE_ENABLE, p1=0)
+        self.wait_statustext('Stopped autotune', check_context=True)
+        self.context_pop()
+        if after["PTCH_RATE_FF"] == before["PTCH_RATE_FF"]:
+            raise NotAchievedException("Autotune did not complete a pitch event")
+        for n in ("PTCH_RATE_P", "PTCH_RATE_D"):
+            if after[n] < 0.99 * before[n]:
+                raise NotAchievedException("First autotune event cut %s from %f to %f" % (n, before[n], after[n]))
+
+        self.fly_home_land_and_disarm()
 
     def LandingDrift(self):
         '''Circuit with baro drift'''
@@ -8086,6 +8131,7 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             self.MAVFTP,
             self.AUTOTUNE,
             self.AutotuneFiltering,
+            self.AutotuneFirstEvent,
             self.MegaSquirt,
             self.Hirth,
             self.MSP_DJI,

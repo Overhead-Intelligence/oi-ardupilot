@@ -61,6 +61,10 @@ public:
     // called at the main loop rate
     void update(struct AP_PIDInfo &pid_info, float scaler, float angle_err_deg);
 
+    // called instead of update() while the aircraft response can't
+    // be learned from, such as while quadplane VTOL motors assist
+    void pause(void);
+
     // are we running?
     bool running;
 

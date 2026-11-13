@@ -49,7 +49,11 @@ public:
     // start/stop auto tuner
     void autotune_start(void);
     void autotune_restore(void);
-    
+
+    // hold the autotune while the aircraft response is not from the
+    // fixed wing control surfaces alone, such as during quadplane assist
+    void autotune_set_paused(bool paused) { autotune_paused = paused; }
+
 
     static const struct AP_Param::GroupInfo var_info[];
 
@@ -74,6 +78,7 @@ private:
     AP_AutoTune::ATGains gains;
     AP_AutoTune *autotune;
     bool failed_autotune_alloc;
-    
+    bool autotune_paused;
+
     AP_PIDInfo _pid_info;
 };
