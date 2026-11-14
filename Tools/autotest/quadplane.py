@@ -2270,6 +2270,128 @@ class AutoTestQuadPlane(vehicle_test_suite.TestSuite):
 
         self.wait_disarmed(timeout=60)
 
+    def TransitionAttitudeHold(self):
+        '''Q_TRANS_HOLD holds attitude and a soft heading in the forward transition'''
+        hdg_err_max = 15
+        self.set_parameters({
+            'Q_TRANS_HOLD': 1,
+            'Q_TRANS_HDG_ERR': hdg_err_max,
+            'Q_TRANS_YAW_SCL': 0.5,
+            # a crosswind from the east gives the tail a weathervane moment
+            # during the northbound transition
+            'SIM_WIND_DIR': 90,
+            'SIM_WIND_SPD': 6,
+        })
+        wps = self.create_simple_relhome_mission([
+            (mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 30),
+            (mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, 2000, 0, 30),
+            (mavutil.mavlink.MAV_CMD_NAV_RETURN_TO_LAUNCH, 0, 0, 0),
+        ])
+        self.check_mission_upload_download(wps)
+        self.change_mode('AUTO')
+        self.wait_ready_to_arm()
+        self.context_collect('STATUSTEXT')
+        self.arm_vehicle()
+        self.wait_statustext('Transition (started|airspeed wait)', regex=True, check_context=True, timeout=120)
+        self.wait_statustext('Transition airspeed reached', check_context=True, timeout=60)
+        self.wait_statustext('Transition done', check_context=True, timeout=60)
+        self.fly_home_land_and_disarm(timeout=180)
+
+        # the hold ran, kept its heading error inside Q_TRANS_HDG_ERR, scaled
+        # the yaw gains down with airspeed, and tracked the pitch target
+        dfreader = self.dfreader_for_current_onboard_log()
+        hold_us = []
+        max_err = 0
+        min_scale = 1
+        max_pitch_err = 0
+        while True:
+            m = dfreader.recv_match(type=['QTRN', 'ATT'])
+            if m is None:
+                break
+            if m.get_type() == 'QTRN':
+                if m.Hold:
+                    hold_us.append(m.TimeUS)
+                    max_err = max(max_err, abs(m.HdgE))
+                    min_scale = min(min_scale, m.YScl)
+            elif len(hold_us) and m.TimeUS - hold_us[-1] < 200000:
+                max_pitch_err = max(max_pitch_err, abs(m.Pitch - m.DesPitch))
+        self.progress("QTRN: %u hold samples, max heading error %.1f deg, min yaw scale %.2f, max pitch error %.1f deg" %
+                      (len(hold_us), max_err, min_scale, max_pitch_err))
+        if len(hold_us) < 10:
+            raise NotAchievedException("attitude hold did not run (%u QTRN samples)" % len(hold_us))
+        if max_err > hdg_err_max + 1:
+            raise NotAchievedException("heading error %.1f deg beyond Q_TRANS_HDG_ERR %u" % (max_err, hdg_err_max))
+        if min_scale > 0.9:
+            raise NotAchievedException("yaw gain scale did not fall with airspeed (min %.2f)" % min_scale)
+        if max_pitch_err > 8:
+            raise NotAchievedException("pitch strayed %.1f deg from its target during the hold" % max_pitch_err)
+
+    def TransitionLiftCheck(self):
+        '''Q_TRANS_MIN_T and Q_TRANS_LIFT hold a forward transition whose pitot reads high'''
+        wps = self.create_simple_relhome_mission([
+            (mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 30),
+            (mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, 2000, 0, 30),
+            (mavutil.mavlink.MAV_CMD_NAV_RETURN_TO_LAUNCH, 0, 0, 0),
+        ])
+        self.check_mission_upload_download(wps)
+        self.context_collect('STATUSTEXT')
+
+        def fly_to_transition_with_stuck_pitot():
+            self.context_clear_collection('STATUSTEXT')
+            self.change_mode('AUTO')
+            self.wait_ready_to_arm()
+            self.arm_vehicle()
+            # the pitot sticks at 25 m/s during the VTOL climb, the way
+            # SL14's water-blocked pitot read about 20 m/s at rest
+            self.wait_altitude(20, 60, relative=True, timeout=120)
+            self.set_parameter('SIM_ARSPD_FAIL', 25)
+            self.wait_statustext('Transition (started|airspeed wait)', regex=True, check_context=True, timeout=60)
+            return self.get_sim_time()
+
+        self.start_subtest("Checks off: the stuck pitot ends the transition at once")
+        t0 = fly_to_transition_with_stuck_pitot()
+        self.wait_statustext('Transition airspeed reached', check_context=True, timeout=10)
+        dt = self.get_sim_time() - t0
+        self.progress("Transition reached airspeed %.1f s after it started" % dt)
+        if dt > 2:
+            raise NotAchievedException("expected the stuck pitot to end the transition at once, took %.1f s" % dt)
+        self.change_mode('QLAND')
+        self.wait_disarmed(timeout=180)
+        self.set_parameter('SIM_ARSPD_FAIL', 0)
+
+        self.start_subtest("Checks on: the transition waits for the wing")
+        self.set_parameters({
+            'Q_TRANS_MIN_T': 3,
+            'Q_TRANS_LIFT': 0.8,
+            'Q_TRANS_FAIL': 30,
+            'Q_TRANS_FAIL_ACT': 1,
+        })
+        self.set_current_waypoint(1, check_afterwards=False)
+        t0 = fly_to_transition_with_stuck_pitot()
+        start_alt = self.get_altitude(relative=True)
+        self.wait_statustext('Transition held', check_context=True, timeout=10)
+        min_alt = start_alt
+        outcome = None
+        while self.get_sim_time_cached() - t0 < 60:
+            min_alt = min(min_alt, self.get_altitude(relative=True))
+            if self.statustext_in_collections('Transition airspeed reached'):
+                outcome = 'reached'
+                break
+            if self.statustext_in_collections('Transition failed'):
+                outcome = 'timed out'
+                break
+        dt = self.get_sim_time() - t0
+        self.progress("Transition %s %.1f s after it started; altitude %.1f m at the start, lowest %.1f m" %
+                      (outcome, dt, start_alt, min_alt))
+        if outcome is None:
+            raise NotAchievedException("transition neither finished nor timed out")
+        if outcome == 'reached' and dt < 2.9:
+            raise NotAchievedException("transition finished %.1f s after it started, before Q_TRANS_MIN_T" % dt)
+        if start_alt - min_alt > 10:
+            raise NotAchievedException("lost %.1f m while the transition was held" % (start_alt - min_alt))
+        self.change_mode('QLAND')
+        self.wait_disarmed(timeout=180)
+
     def MAV_CMD_NAV_TAKEOFF(self):
         '''test issuing takeoff command via mavlink'''
         self.change_mode('GUIDED')
@@ -3543,6 +3665,8 @@ class AutoTestQuadPlane(vehicle_test_suite.TestSuite):
             self.mavlink_MAV_CMD_DO_VTOL_TRANSITION,
             self.TransitionMinThrottle,
             self.BackTransitionMinThrottle,
+            self.TransitionAttitudeHold,
+            self.TransitionLiftCheck,
             self.MAV_CMD_NAV_TAKEOFF,
             self.Q_GUIDED_MODE,
             self.DCMClimbRate,

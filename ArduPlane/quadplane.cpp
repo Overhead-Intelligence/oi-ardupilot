@@ -573,6 +573,49 @@ const AP_Param::GroupInfo QuadPlane::var_info2[] = {
     // @Bitmask: 1: Disable thrust loss detection in transtions and fixed wing modes. Thrust loss detection will only run in VTOL modes.
     AP_GROUPINFO("THRST_LOSS_OPT", 42, QuadPlane, thrust_loss.options, 0),
 
+    // indices 56 to 60 leave room for parameters upstream adds after 42
+
+    // @Param: TRANS_HOLD
+    // @DisplayName: Forward transition attitude hold
+    // @Description: Separate lift thrust aircraft only. When 1, during the airspeed wait of a forward transition that starts from a VTOL mode, the VTOL attitude controller holds the navigation roll and pitch and a soft heading target, and the control surfaces follow its rate demand. The heading target turns at the coordinated rate for the commanded bank at the measured airspeed. The fixed wing controllers take over when the airspeed wait ends. When 0, the lift motors follow the fixed wing rate demand with no attitude or heading hold, as before.
+    // @Values: 0:Disabled,1:Enabled
+    // @User: Advanced
+    AP_GROUPINFO("TRANS_HOLD", 56, QuadPlane, trans_hold.hold, 0),
+
+    // @Param: TRANS_HDG_ERR
+    // @DisplayName: Forward transition attitude hold heading error limit
+    // @Description: Largest heading error the attitude hold of Q_TRANS_HOLD keeps. Beyond it the heading target follows the aircraft, so a steady yaw moment (crosswind weathervaning, prop yaw) moves the heading instead of being fought with steady lift-motor yaw, which twists the wing. 0 removes the limit.
+    // @Units: deg
+    // @Range: 0 90
+    // @Increment: 1
+    // @User: Advanced
+    AP_GROUPINFO("TRANS_HDG_ERR", 57, QuadPlane, trans_hold.hdg_err_deg, 15),
+
+    // @Param: TRANS_YAW_SCL
+    // @DisplayName: Forward transition attitude hold yaw gain scale
+    // @Description: Fraction of the VTOL yaw rate controller gains left at AIRSPEED_MIN while the attitude hold of Q_TRANS_HOLD runs. The gains scale linearly from full at zero airspeed to this fraction at AIRSPEED_MIN. Lift-motor yaw twists the wing, and the twist rolls the aircraft once the wing carries load, so less yaw is asked of the lift motors as airspeed builds. 1 keeps the full gains.
+    // @Range: 0.1 1
+    // @Increment: 0.05
+    // @User: Advanced
+    AP_GROUPINFO("TRANS_YAW_SCL", 58, QuadPlane, trans_hold.yaw_scale, 0.5),
+
+    // @Param: TRANS_MIN_T
+    // @DisplayName: Forward transition minimum airspeed wait
+    // @Description: Separate lift thrust aircraft only. A forward transition that starts from a VTOL mode cannot leave the airspeed wait until this long after it started, whatever the airspeed reads. Guards against a pitot that reads high, which otherwise ends the transition at once and ramps the lift motors down at hover speed. 0 disables the check.
+    // @Units: s
+    // @Range: 0 15
+    // @Increment: 0.5
+    // @User: Advanced
+    AP_GROUPINFO("TRANS_MIN_T", 59, QuadPlane, trans_hold.min_time_s, 0),
+
+    // @Param: TRANS_LIFT
+    // @DisplayName: Forward transition lift throttle limit
+    // @Description: Separate lift thrust aircraft only. A forward transition that starts from a VTOL mode cannot leave the airspeed wait while the lift throttle is above this fraction of the hover throttle (Q_M_THST_HOVER), because the lift motors are still carrying the aircraft and the wing is not. Guards against a pitot that reads high. If the airspeed never builds, Q_TRANS_FAIL ends the transition. 0 disables the check.
+    // @Range: 0 1
+    // @Increment: 0.05
+    // @User: Advanced
+    AP_GROUPINFO("TRANS_LIFT", 60, QuadPlane, trans_hold.lift_max, 0),
+
     AP_GROUPEND
 };
 
@@ -1530,6 +1573,7 @@ void SLT_Transition::update()
         transition_state = State::DONE;
         transition_start_ms = 0;
         transition_low_airspeed_ms = 0;
+        from_vtol = false;
     }
 
     if (transition_state != State::DONE) {
@@ -1582,10 +1626,26 @@ void SLT_Transition::update()
         }
 
         transition_low_airspeed_ms = now;
+        // Q_TRANS_MIN_T and Q_TRANS_LIFT can hold a transition from VTOL
+        // whose airspeed reads high but whose wing is not yet flying
+        uint8_t blocked = 0;
+        const bool completion_ok = completion_allowed(now, blocked);
         if (have_airspeed && aspeed > plane.aparm.airspeed_min && !quadplane.assisted_flight) {
-            transition_state = State::TIMER;
-            airspeed_reached_tilt = quadplane.tiltrotor.current_tilt;
-            gcs().send_text(MAV_SEVERITY_INFO, "Transition airspeed reached %.1f", (double)aspeed);
+            if (completion_ok) {
+                transition_state = State::TIMER;
+                airspeed_reached_tilt = quadplane.tiltrotor.current_tilt;
+                gcs().send_text(MAV_SEVERITY_INFO, "Transition airspeed reached %.1f", (double)aspeed);
+            } else if (!completion_held_msg) {
+                completion_held_msg = true;
+                if (blocked & 2) {
+                    const float hover = motors->get_throttle_hover();
+                    gcs().send_text(MAV_SEVERITY_WARNING, "Transition held: airspeed %.1f, lift %.0f%% of hover",
+                                    (double)aspeed, (double)(is_positive(hover) ? 100 * motors->get_throttle() / hover : 0));
+                } else {
+                    gcs().send_text(MAV_SEVERITY_WARNING, "Transition held: airspeed %.1f before %.1fs",
+                                    (double)aspeed, (double)quadplane.trans_hold.min_time_s.get());
+                }
+            }
         }
         quadplane.assisted_flight = true;
 
@@ -1600,10 +1660,27 @@ void SLT_Transition::update()
         }
         quadplane.hold_hover(climb_rate_cms);
 
-        if (!quadplane.tiltrotor.is_vectored()) {
+        if (attitude_hold_active()) {
+            // the attitude controller holds the heading target set in
+            // update_yaw_target(), so leave its yaw target alone. Lift-motor
+            // yaw twists the wing, and the twist rolls the aircraft once the
+            // wing carries load, so scale the VTOL yaw gains from full at zero
+            // airspeed to Q_TRANS_YAW_SCL at AIRSPEED_MIN. The multipliers
+            // reset after every run of the rate controller.
+            const float speed_frac = have_airspeed ? constrain_float(aspeed / MAX(plane.aparm.airspeed_min, 1), 0, 1) : 0;
+            const float scale_min = constrain_float(quadplane.trans_hold.yaw_scale, 0.1, 1);
+            hold_yaw_scale = 1.0 - speed_frac * (1.0 - scale_min);
+            const Vector3f yaw_scale{1.0, 1.0, hold_yaw_scale};
+            quadplane.attitude_control->set_PD_scale_mult(yaw_scale);
+            quadplane.attitude_control->set_I_scale_mult(yaw_scale);
+        } else if (!quadplane.tiltrotor.is_vectored()) {
+            hold_yaw_scale = 1.0;
             // set desired yaw rate to a coordinated turn
             quadplane.attitude_control->reset_yaw_target_and_rate();
             quadplane.attitude_control->rate_bf_yaw_target(quadplane.desired_auto_yaw_rate_cds(true));
+        }
+        if (from_vtol) {
+            log_transition(have_airspeed ? aspeed : 0, blocked);
         }
         if (quadplane.tiltrotor.enabled() && !quadplane.tiltrotor.has_fw_motor()) {
             // tilt rotors without dedicated fw motors do not have forward throttle output in this stage
@@ -1636,6 +1713,7 @@ void SLT_Transition::update()
             in_forced_transition = false;
             transition_start_ms = 0;
             transition_low_airspeed_ms = 0;
+            from_vtol = false;
             float throttle;
             if (plane.quadplane.tiltrotor.get_forward_throttle(throttle)) {
                 // Reset the TECS minimum throttle to match throttle of forward thrust motors
@@ -1678,6 +1756,10 @@ void SLT_Transition::update()
             quadplane.attitude_control->reset_yaw_target_and_rate();
             quadplane.attitude_control->rate_bf_yaw_target(quadplane.desired_auto_yaw_rate_cds(true));
         }
+        if (from_vtol) {
+            float eas;
+            log_transition(quadplane.ahrs.airspeed_EAS(eas) ? eas : 0, 0);
+        }
         break;
     }
 
@@ -1711,6 +1793,14 @@ void SLT_Transition::VTOL_update()
         transition_state = State::AIRSPEED_WAIT;
     }
     last_throttle = motors->get_throttle();
+
+    // the next transition starts from VTOL: arm the attitude hold and the
+    // completion checks for it (Q_TRANS_HOLD, Q_TRANS_MIN_T, Q_TRANS_LIFT)
+    from_vtol = (transition_state == State::AIRSPEED_WAIT);
+    hold_yaw_ms = 0;
+    hold_yaw_scale = 1.0;
+    hold_yaw_err_cd = 0;
+    completion_held_msg = false;
 
     // Keep assistance reset while not checking
     quadplane.assist.reset();
@@ -4302,8 +4392,157 @@ bool QuadPlane::show_vtol_view() const
 // return true if we should show VTOL view
 bool SLT_Transition::show_vtol_view() const
 {
+    // the attitude hold flies the VTOL attitude controller, so log and
+    // report its targets (ANG, ATT) while it runs, as tiltrotors do
+    return quadplane.in_vtol_mode() || attitude_hold_active();
+}
 
-    return quadplane.in_vtol_mode();
+/*
+  Q_TRANS_HOLD runs during the airspeed wait of a forward transition
+  that started from a VTOL mode, on a separate lift thrust aircraft.
+  Tiltrotors and tailsitters have their own transitions.
+ */
+bool SLT_Transition::attitude_hold_active() const
+{
+    return quadplane.trans_hold.hold == 1 &&
+           from_vtol &&
+           !in_forced_transition &&
+           transition_state == State::AIRSPEED_WAIT &&
+           !quadplane.tiltrotor.enabled() &&
+           !quadplane.tailsitter.enabled();
+}
+
+/*
+  with the attitude hold, the fixed wing surfaces follow the VTOL rate
+  demand (see QuadPlane::use_fw_attitude_controllers())
+ */
+bool SLT_Transition::use_multirotor_control_in_fwd_transition() const
+{
+    return attitude_hold_active();
+}
+
+/*
+  heading target of the attitude hold. Returning true makes
+  QuadPlane::multicopter_attitude_rate_update() run the VTOL attitude
+  controller on the navigation roll and pitch and this heading.
+ */
+bool SLT_Transition::update_yaw_target(float& yaw_target_cd)
+{
+    if (!attitude_hold_active()) {
+        hold_yaw_ms = 0;
+        return false;
+    }
+    const uint32_t now = AP_HAL::millis();
+    const float yaw_cd = quadplane.ahrs.yaw_sensor;
+    float reset_rad;
+    const uint32_t reset_ms = quadplane.ahrs.getLastYawResetAngle(reset_rad);
+
+    if (hold_yaw_ms == 0 || now - hold_yaw_ms > 200 ||
+        !is_zero(quadplane.get_pilot_input_yaw_rate_cds())) {
+        // lock the heading when the hold starts, after a gap, and while
+        // the pilot commands yaw
+        hold_yaw_cd = yaw_cd;
+        hold_yaw_reset_ms = reset_ms;
+    } else {
+        if (reset_ms != hold_yaw_reset_ms) {
+            // move the target with an EKF yaw reset, so the reset does not
+            // become a yaw demand
+            hold_yaw_cd = wrap_360_cd(hold_yaw_cd + degrees(reset_rad) * 100);
+            hold_yaw_reset_ms = reset_ms;
+        }
+        // turn the target at the coordinated rate for the commanded bank.
+        // Use the measured airspeed, not AIRSPEED_MIN as
+        // desired_auto_yaw_rate_cds() does, so the lift motors do not push
+        // against a turn at low speed. The floor keeps the rate finite near
+        // hover.
+        float aspeed;
+        if (!quadplane.ahrs.airspeed_EAS(aspeed)) {
+            aspeed = 0;
+        }
+        const float speed = MAX(aspeed, MAX(0.5 * plane.aparm.airspeed_min, 5.0));
+        const float dt = (now - hold_yaw_ms) * 0.001;
+        hold_yaw_cd = wrap_360_cd(hold_yaw_cd + fixedwing_turn_rate(plane.nav_roll_cd * 0.01, speed) * 100 * dt);
+
+        // soft hold: keep the target within Q_TRANS_HDG_ERR of the heading,
+        // so a steady yaw moment moves the heading instead of being fought
+        // with steady lift-motor yaw
+        const float max_err_cd = quadplane.trans_hold.hdg_err_deg * 100;
+        const float err_cd = wrap_180_cd(hold_yaw_cd - yaw_cd);
+        if (is_positive(max_err_cd) && fabsf(err_cd) > max_err_cd) {
+            hold_yaw_cd = wrap_360_cd(yaw_cd + (err_cd > 0 ? max_err_cd : -max_err_cd));
+        }
+    }
+    hold_yaw_ms = now;
+    hold_yaw_err_cd = wrap_180_cd(hold_yaw_cd - yaw_cd);
+    yaw_target_cd = hold_yaw_cd;
+    return true;
+}
+
+/*
+  Q_TRANS_MIN_T and Q_TRANS_LIFT: a forward transition from VTOL may
+  leave the airspeed wait only once it has run for Q_TRANS_MIN_T and the
+  lift throttle is at or below Q_TRANS_LIFT of the hover throttle. A
+  pitot that reads high otherwise ends the transition at once and ramps
+  the lift motors down at hover speed. Q-assist and tiltrotors are
+  unchanged. blocked: bit 0 minimum time, bit 1 lift throttle.
+ */
+bool SLT_Transition::completion_allowed(uint32_t now_ms, uint8_t &blocked) const
+{
+    blocked = 0;
+    if (!from_vtol || in_forced_transition || quadplane.tiltrotor.enabled()) {
+        return true;
+    }
+    const float min_time_s = quadplane.trans_hold.min_time_s;
+    if (is_positive(min_time_s) && transition_start_ms != 0 &&
+        (now_ms - transition_start_ms) < uint32_t(min_time_s * 1000)) {
+        blocked |= 1;
+    }
+    const float lift_max = quadplane.trans_hold.lift_max;
+    const float hover = motors->get_throttle_hover();
+    if (is_positive(lift_max) && is_positive(hover) && motors->get_throttle() > lift_max * hover) {
+        blocked |= 2;
+    }
+    return blocked == 0;
+}
+
+/*
+  QTRN log message, 10 Hz during a forward transition from VTOL
+ */
+void SLT_Transition::log_transition(float aspeed, uint8_t blocked)
+{
+#if HAL_LOGGING_ENABLED
+    const uint32_t now = AP_HAL::millis();
+    if (now - last_log_ms < 100) {
+        return;
+    }
+    last_log_ms = now;
+    const float hover = motors->get_throttle_hover();
+    const float lift = is_positive(hover) ? motors->get_throttle() / hover : 0;
+
+    // @LoggerMessage: QTRN
+    // @Vehicles: Plane
+    // @Description: Forward transition from VTOL: attitude hold (Q_TRANS_HOLD) and completion checks (Q_TRANS_MIN_T, Q_TRANS_LIFT)
+    // @Field: TimeUS: Time since system startup
+    // @Field: St: transition state: 0 airspeed wait, 1 timer, 2 done
+    // @Field: Hold: 1 while the attitude hold runs
+    // @Field: HdgT: heading target of the attitude hold
+    // @Field: HdgE: heading target minus heading
+    // @Field: YScl: VTOL yaw gain scale applied by the attitude hold
+    // @Field: Lift: lift throttle over hover throttle
+    // @Field: Blk: completion checks holding the transition: bit 0 minimum time, bit 1 lift throttle
+    // @Field: Asp: airspeed estimate
+    AP::logger().WriteStreaming("QTRN", "TimeUS,St,Hold,HdgT,HdgE,YScl,Lift,Blk,Asp",
+                                "s--hd---n", "F--00---0", "QBBffffBf",
+                                AP_HAL::micros64(),
+                                uint8_t(transition_state),
+                                uint8_t(attitude_hold_active()),
+                                hold_yaw_cd * 0.01,
+                                hold_yaw_err_cd * 0.01,
+                                hold_yaw_scale,
+                                lift,
+                                blocked,
+                                aspeed);
+#endif
 }
 
 /*
@@ -4633,6 +4872,7 @@ void SLT_Transition::force_transition_complete()
     in_forced_transition = false;
     transition_start_ms = 0;
     transition_low_airspeed_ms = 0;
+    from_vtol = false;
     set_last_fw_pitch();
 
     // Keep assistance reset while not checking

@@ -326,6 +326,14 @@ private:
         bool warned;
     } transition_failure;
 
+    // forward transition attitude hold and completion checks (SLT only)
+    struct {
+        AP_Int8 hold;           // Q_TRANS_HOLD: 1 = VTOL attitude and soft heading hold in the airspeed wait
+        AP_Float hdg_err_deg;   // Q_TRANS_HDG_ERR: largest heading error the hold keeps
+        AP_Float yaw_scale;     // Q_TRANS_YAW_SCL: VTOL yaw gain fraction left at AIRSPEED_MIN
+        AP_Float min_time_s;    // Q_TRANS_MIN_T: shortest airspeed wait, s (0 = off)
+        AP_Float lift_max;      // Q_TRANS_LIFT: lift throttle over hover throttle to finish (0 = off)
+    } trans_hold;
 
     // Quadplane trim, degrees
     AP_Float ahrs_trim_pitch;
