@@ -106,6 +106,13 @@ public:
 
     void set_last_fw_pitch(void) override;
 
+    // attitude hold of Q_TRANS_HOLD: the VTOL attitude controller holds the
+    // navigation roll and pitch and a soft heading target through the airspeed
+    // wait of a forward transition from VTOL, and the surfaces follow its rates
+    bool update_yaw_target(float& yaw_target_cd) override;
+
+    bool use_multirotor_control_in_fwd_transition() const override;
+
 protected:
 
     enum class State {
@@ -113,6 +120,34 @@ protected:
         TIMER         = 1,
         DONE          = 2,
     } transition_state;
+
+    // true while the attitude hold of Q_TRANS_HOLD runs
+    bool attitude_hold_active() const;
+
+    // checks of Q_TRANS_MIN_T and Q_TRANS_LIFT that must pass before a
+    // forward transition from VTOL may leave the airspeed wait
+    bool completion_allowed(uint32_t now_ms, uint8_t &blocked) const;
+
+    // QTRN log message, 10 Hz during a forward transition from VTOL
+    void log_transition(float aspeed, uint8_t blocked);
+
+    // this transition started from a VTOL mode, not from a Q-assist
+    bool from_vtol;
+
+    // heading target of the attitude hold, the time it was last updated and
+    // the time of the last EKF yaw reset already applied to it
+    float hold_yaw_cd;
+    uint32_t hold_yaw_ms;
+    uint32_t hold_yaw_reset_ms;
+
+    // yaw gain scale and heading error of the attitude hold, for the log
+    float hold_yaw_scale = 1.0;
+    float hold_yaw_err_cd;
+
+    // a message has been sent for a transition the completion checks held
+    bool completion_held_msg;
+
+    uint32_t last_log_ms;
 
     // timer start for transition
     uint32_t transition_start_ms;
